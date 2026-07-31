@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "app/api/patents/analyze/route.ts": {
+      "maxDuration": 90
+    }
+  }
+}
