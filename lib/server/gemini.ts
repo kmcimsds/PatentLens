@@ -9,7 +9,9 @@ import type { SerpPatentData } from "@/lib/server/serpapi";
 
 const GEMINI_TIMEOUT_MS = 75_000;
 const GEMINI_TRANSLATE_TIMEOUT_MS = 20_000;
-const DEFAULT_MODEL = "gemini-2.5-flash";
+// Gemini 3.x는 temperature·topP·topK 기본값(1.0)에 맞춰 튜닝되어 있어,
+// 값을 낮추면 응답이 반복되거나 추론 품질이 떨어진다. 샘플링 파라미터를 지정하지 말 것.
+const DEFAULT_MODEL = "gemini-3.6-flash";
 
 const RELATED_TITLE_TRANSLATE_SCHEMA = {
   type: "object",
@@ -362,14 +364,13 @@ export async function translateRelatedPatentTitles(
 
   const ai = new GoogleGenAI({ apiKey });
   const request = ai.models.generateContent({
-    model: process.env.GEMINI_MODEL || DEFAULT_MODEL,
+    model: resolveModel(),
     contents: buildRelatedTitlePrompt(needsTranslation),
     config: {
       systemInstruction:
         "너는 특허 제목 번역 전문가이다. JSON Schema에 맞춰 한국어 특허 제목만 반환한다.",
       responseMimeType: "application/json",
       responseJsonSchema: RELATED_TITLE_TRANSLATE_SCHEMA,
-      temperature: 0.1,
     },
   });
 
@@ -385,7 +386,12 @@ export async function translateRelatedPatentTitles(
         );
       }),
     ]);
-  } catch {
+  } catch (error) {
+    console.warn("Related title translation failed", {
+      model: resolveModel(),
+      status: errorStatus(error),
+      detail: errorDetail(error),
+    });
     return relatedPatents;
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
@@ -409,7 +415,10 @@ export async function translateRelatedPatentTitles(
         (isMostlyKorean(item.title) ? item.title : undefined);
       return translated ? { ...item, titleKo: translated } : item;
     });
-  } catch {
+  } catch (error) {
+    console.warn("Related title parsing failed", {
+      detail: errorDetail(error),
+    });
     return relatedPatents;
   }
 }
@@ -420,6 +429,87 @@ function errorStatus(error: unknown): number | undefined {
     (error as { status?: unknown }).status ??
     (error as { code?: unknown }).code;
   return typeof value === "number" ? value : Number(value) || undefined;
+}
+
+function resolveModel(): string {
+  return process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
+}
+
+function errorDetail(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "Unserializable error";
+  }
+}
+
+// Gemini 실패 원인은 응답 본문에만 담겨 오고 사용자에게는 노출하면 안 되므로,
+// 원본을 서버 로그에 남긴 뒤 사용자가 직접 조치할 수 있는 경우에만 안내를 구체화한다.
+function geminiFailure(error: unknown, context: string): ApiError {
+  const status = errorStatus(error);
+  const detail = errorDetail(error);
+  const model = resolveModel();
+  console.error("Gemini request failed", { context, model, status, detail });
+
+  if (status === 429 || /RESOURCE_EXHAUSTED/i.test(detail)) {
+    return new ApiError(
+      429,
+      "RATE_LIMITED",
+      "Gemini API 요청 한도를 초과했습니다. 잠시 후 다시 시도해 주세요.",
+      true
+    );
+  }
+  if (status === 503 || /UNAVAILABLE/i.test(detail)) {
+    return new ApiError(
+      503,
+      "ANALYSIS_FAILED",
+      "AI 모델이 일시적으로 혼잡합니다. 잠시 후 다시 시도해 주세요.",
+      true
+    );
+  }
+  if (/API_KEY_INVALID|API key not valid/i.test(detail)) {
+    return new ApiError(
+      400,
+      "CONFIGURATION_ERROR",
+      "Gemini API 키가 유효하지 않습니다. 키를 다시 확인해 입력해 주세요."
+    );
+  }
+  if (/API_KEY_SERVICE_BLOCKED/i.test(detail)) {
+    return new ApiError(
+      400,
+      "CONFIGURATION_ERROR",
+      "이 Gemini API 키는 사용 제한이 설정되지 않아 차단되었습니다. Google AI Studio에서 키를 새로 발급받아 주세요."
+    );
+  }
+  if (/SERVICE_DISABLED|has not been used in project/i.test(detail)) {
+    return new ApiError(
+      400,
+      "CONFIGURATION_ERROR",
+      "이 키가 속한 Google Cloud 프로젝트에서 Gemini API가 비활성화되어 있습니다. Google AI Studio에서 키를 새로 발급받아 주세요."
+    );
+  }
+  if (status === 401 || status === 403) {
+    return new ApiError(
+      400,
+      "CONFIGURATION_ERROR",
+      "Gemini API 키에 사용 권한이 없습니다. 키에 걸린 IP·리퍼러 제한을 해제하거나 새 키를 발급받아 주세요."
+    );
+  }
+  if (status === 404) {
+    return new ApiError(
+      502,
+      "ANALYSIS_FAILED",
+      `AI 모델(${model})을 사용할 수 없습니다. 서비스 관리자에게 문의해 주세요.`
+    );
+  }
+  return new ApiError(
+    502,
+    "ANALYSIS_FAILED",
+    "AI 분석에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+    true
+  );
 }
 
 export async function analyzePatentWithGemini(
@@ -437,14 +527,12 @@ export async function analyzePatentWithGemini(
 
   const ai = new GoogleGenAI({ apiKey });
   const request = ai.models.generateContent({
-    model: process.env.GEMINI_MODEL || DEFAULT_MODEL,
+    model: resolveModel(),
     contents: buildAnalysisPrompt(patent),
     config: {
       systemInstruction: SYSTEM_PROMPT,
       responseMimeType: "application/json",
       responseJsonSchema: GEMINI_RESPONSE_SCHEMA,
-      // 구조화 JSON 안정성 유지 + 번역투/괄호 남용 완화용으로 소폭 상향
-      temperature: 0.15,
     },
   });
 
@@ -472,21 +560,7 @@ export async function analyzePatentWithGemini(
     ]);
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    const status = errorStatus(error);
-    if (status === 429) {
-      throw new ApiError(
-        429,
-        "RATE_LIMITED",
-        "Gemini API 요청 한도를 초과했습니다. 잠시 후 다시 시도해 주세요.",
-        true
-      );
-    }
-    throw new ApiError(
-      502,
-      "ANALYSIS_FAILED",
-      "AI 분석에 실패했습니다. 잠시 후 다시 시도해 주세요.",
-      true
-    );
+    throw geminiFailure(error, "analyzePatent");
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
@@ -495,7 +569,11 @@ export async function analyzePatentWithGemini(
     const rawText = response.text;
     if (!rawText) throw new Error("Empty Gemini response");
     return GeminiAnalysisSchema.parse(JSON.parse(rawText));
-  } catch {
+  } catch (error) {
+    console.error("Gemini response parsing failed", {
+      model: resolveModel(),
+      detail: errorDetail(error),
+    });
     throw new ApiError(
       502,
       "ANALYSIS_FAILED",

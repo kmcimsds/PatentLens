@@ -32,7 +32,7 @@ npm run dev
 ```text
 SERPAPI_KEY=발급받은_SerpApi_키
 GEMINI_API_KEY=발급받은_Gemini_키
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=
 ```
 
 회사/학교 네트워크에서 HTTPS 인증서 오류가 나면 PowerShell에서 다음으로 실행하세요.
@@ -86,11 +86,11 @@ Noto Sans KR 폰트가 PDF에 임베드되어 텍스트를 복사·검색할 수
 |------|------|
 | `SERPAPI_KEY` | (선택) 서버 기본 SerpApi 키 |
 | `GEMINI_API_KEY` | (선택) 서버 기본 Gemini 키 |
-| `GEMINI_MODEL` | (선택) 기본 `gemini-2.5-flash` |
+| `GEMINI_MODEL` | (선택) 기본 `gemini-3.6-flash`. 모델 폐기 시 최신 모델명으로 덮어쓰기 |
 | `RATE_LIMIT_MAX` | (선택) IP당 분당 분석 횟수, 기본 `10` |
 | `RATE_LIMIT_WINDOW_MS` | (선택) 제한 창(ms), 기본 `60000` |
 
-`vercel.json`에 분석 API `maxDuration: 90`초가 설정되어 있습니다. Hobby 플랜은 함수 실행 시간 제한이 더 짧을 수 있으니, Pro 또는 Edge/Serverless 설정을 확인하세요.
+`vercel.json`에 분석 API `maxDuration: 90`초가 설정되어 있습니다. Fluid Compute가 켜져 있으면 Hobby 플랜도 최대 300초까지 허용되므로 여유가 있지만, 꺼져 있으면 60초에서 잘리니 프로젝트 설정을 확인하세요.
 
 ### 3. 배포 후 확인
 
@@ -102,7 +102,7 @@ Noto Sans KR 폰트가 PDF에 임베드되어 텍스트를 복사·검색할 수
 | 서비스 | 1회 분석당 | 참고 |
 |--------|-----------|------|
 | SerpApi | Google Patents Details 1회 | [SerpApi 요금제](https://serpapi.com/pricing) — 무료 티어는 월 검색 수 제한 |
-| Gemini | 본문 분석 1회 + 연관 제목 번역 1회 | [Google AI 가격](https://ai.google.dev/pricing) — `gemini-2.5-flash`는 비교적 저렴 |
+| Gemini | 본문 분석 1회 + 연관 제목 번역 1회 | [Google AI 가격](https://ai.google.dev/pricing) — Flash 계열은 비교적 저렴 |
 
 - **BYOK 권장:** 키와 비용을 사용자/팀 단위로 분리할 수 있습니다.
 - **앱 rate limit:** 기본 IP당 분당 10회(`RATE_LIMIT_MAX`)로 남용을 완화합니다. 서버리스 인스턴스마다 메모리 기반이라 완전한 전역 제한은 아닙니다.
