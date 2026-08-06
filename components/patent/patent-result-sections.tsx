@@ -328,9 +328,16 @@ export function PatentResultSections({ data }: { data: PatentAnalysis }) {
             >
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="font-mono text-xs font-medium text-primary">
-                    {p.number}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-mono text-xs font-medium text-primary">
+                      {p.number}
+                    </p>
+                    {p.publicationDate && (
+                      <Badge variant="secondary" className="font-normal">
+                        {p.publicationDate.slice(0, 4)}년 공개
+                      </Badge>
+                    )}
+                  </div>
                   <p className="mt-1 font-medium leading-snug group-hover:text-primary">
                     {p.titleKo || p.title}
                   </p>

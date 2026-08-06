@@ -233,7 +233,11 @@ function reportBody(data: PatentAnalysis): string {
     ? data.relatedPatents
         .map(
           (item) => `<div class="pdf-card">
-            <div class="pdf-mono">${escapeHtml(item.number)}</div>
+            <div class="pdf-mono">${escapeHtml(item.number)}${
+              item.publicationDate
+                ? ` · ${escapeHtml(item.publicationDate.slice(0, 4))}년 공개`
+                : ""
+            }</div>
             <strong>${escapeHtml(item.titleKo || item.title)}</strong>
             ${
               item.titleKo && item.titleKo !== item.title

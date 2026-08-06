@@ -13,6 +13,8 @@ export type RelatedPatent = {
   /** Gemini로 번역한 한국어 제목 (없으면 title 표시) */
   titleKo?: string;
   assignee: string;
+  /** 원문 공개일(YYYY-MM-DD). 확인되지 않으면 생략 */
+  publicationDate?: string;
   relevance: string;
   url: string;
 };

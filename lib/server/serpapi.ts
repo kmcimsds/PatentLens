@@ -8,6 +8,18 @@ import { ApiError, isAbortError } from "@/lib/server/api-error";
 const SERPAPI_ENDPOINT = "https://serpapi.com/search.json";
 const SERPAPI_TIMEOUT_MS = 25_000;
 
+// 연관 특허 추천 가중치. Google Patents가 돌려주는 순서는 오래된 원천 특허 쪽으로
+// 크게 쏠려 있어, 관련성과 최신성을 함께 반영해 다시 정렬한다.
+const RELATED_LIMIT = 5;
+const RELEVANCE_WEIGHT = 0.45;
+const RECENCY_WEIGHT = 0.55;
+const HALF_LIFE_BASE = 0.5;
+const RECENCY_HALF_LIFE_YEARS = 7;
+const RELEVANCE_HALF_LIFE_RANK = 8;
+const RECENT_WINDOW_YEARS = 10;
+const MIN_RECENT_RELATED = 2;
+const MIN_SIMILAR_RELATED = 1;
+
 type JsonRecord = Record<string, unknown>;
 
 export type SerpPatentData = {
@@ -169,51 +181,166 @@ async function fetchDescription(descriptionLink: string): Promise<string> {
   }
 }
 
+type RelatedSource = "citedBy" | "similar" | "family";
+
+// cited_by.original은 이 특허와 직접 맺어진 인용 관계라 연결이 가장 확실하고,
+// family_to_family는 패밀리 단위 인용이라 가장 느슨하다.
+const SOURCE_WEIGHT: Record<RelatedSource, number> = {
+  citedBy: 1,
+  similar: 0.85,
+  family: 0.7,
+};
+
+// similar_documents만 관련도순으로 내려오고, cited_by 계열은 공개일 오름차순이다.
+// 후자에 순번 감쇠를 적용하면 오히려 최신 인용 특허가 뒤로 밀린다.
+const RANKED_BY_RELEVANCE: Record<RelatedSource, boolean> = {
+  citedBy: false,
+  similar: true,
+  family: false,
+};
+
+const SOURCE_LABEL: Record<RelatedSource, string> = {
+  citedBy: "이 특허와 인용 관계인 특허",
+  similar: "Google Patents 유사 문헌",
+  family: "특허 패밀리 인용 문헌",
+};
+
+type RankedRelated = {
+  patent: RelatedPatent;
+  source: RelatedSource;
+  year?: number;
+  score: number;
+};
+
+function relevanceScoreFor(source: RelatedSource, index: number): number {
+  const weight = SOURCE_WEIGHT[source];
+  if (!RANKED_BY_RELEVANCE[source]) return weight;
+  return weight * HALF_LIFE_BASE ** (index / RELEVANCE_HALF_LIFE_RANK);
+}
+
+// cited_by 목록에는 본특허보다 공개일이 앞선 문헌도 섞여 들어오므로,
+// 실제로 뒤에 나온 문헌일 때만 "후속 특허"라고 단정한다.
+function relevanceLabel(
+  source: RelatedSource,
+  year: number | undefined,
+  sourceYear: number | undefined
+): string {
+  if (source !== "citedBy") return SOURCE_LABEL[source];
+  const isForward =
+    year !== undefined && sourceYear !== undefined && year > sourceYear;
+  return isForward ? "이 특허를 인용한 후속 특허" : SOURCE_LABEL.citedBy;
+}
+
+function publicationYear(value: string): number | undefined {
+  const match = /^(\d{4})/.exec(value.trim());
+  if (!match) return undefined;
+  const year = Number(match[1]);
+  const limit = new Date().getFullYear() + 1;
+  return year >= 1800 && year <= limit ? year : undefined;
+}
+
+function recencyScore(year: number | undefined): number {
+  // 연도를 모르는 후보는 최신·구형 어느 쪽으로도 단정할 수 없어 중간보다 약간 낮게 둔다.
+  if (year === undefined) return 0.35;
+  const age = Math.max(0, new Date().getFullYear() - year);
+  return HALF_LIFE_BASE ** (age / RECENCY_HALF_LIFE_YEARS);
+}
+
+// 종합 점수만으로 자르면 5칸이 한쪽으로 쏠린다. 인용 관계는 최신 문헌이, 유사 문헌은
+// 의미적으로 가까운 문헌이 강점이므로 각각의 자리를 먼저 확보한 뒤 나머지를 점수로 채운다.
+function pickBalanced(ranked: RankedRelated[]): RankedRelated[] {
+  const cutoff = new Date().getFullYear() - RECENT_WINDOW_YEARS;
+  const picked: RankedRelated[] = [];
+  const taken = new Set<RankedRelated>();
+
+  const reserve = (pool: RankedRelated[], slots: number) => {
+    let remaining = Math.min(slots, RELATED_LIMIT - picked.length);
+    for (const item of pool) {
+      if (remaining <= 0) break;
+      if (taken.has(item)) continue;
+      picked.push(item);
+      taken.add(item);
+      remaining -= 1;
+    }
+  };
+
+  reserve(
+    ranked.filter((item) => item.year !== undefined && item.year >= cutoff),
+    MIN_RECENT_RELATED
+  );
+  reserve(
+    ranked.filter((item) => item.source === "similar"),
+    MIN_SIMILAR_RELATED
+  );
+  reserve(ranked, RELATED_LIMIT);
+
+  return picked.sort((a, b) => b.score - a.score);
+}
+
 function relatedFrom(raw: JsonRecord, currentNumber: string): RelatedPatent[] {
-  const candidates = [
-    ...(Array.isArray(raw.similar_documents) ? raw.similar_documents : []),
-    ...(Array.isArray(asRecord(raw.cited_by).original)
-      ? (asRecord(raw.cited_by).original as unknown[])
-      : []),
-    ...(Array.isArray(asRecord(raw.cited_by).family_to_family)
-      ? (asRecord(raw.cited_by).family_to_family as unknown[])
-      : []),
+  const citedBy = asRecord(raw.cited_by);
+  const groups: { source: RelatedSource; items: unknown[] }[] = [
+    {
+      source: "citedBy",
+      items: Array.isArray(citedBy.original) ? citedBy.original : [],
+    },
+    {
+      source: "similar",
+      items: Array.isArray(raw.similar_documents) ? raw.similar_documents : [],
+    },
+    {
+      source: "family",
+      items: Array.isArray(citedBy.family_to_family)
+        ? citedBy.family_to_family
+        : [],
+    },
   ];
 
+  const sourceYear = publicationYear(asString(raw.publication_date));
   const seen = new Set<string>();
-  const results: RelatedPatent[] = [];
+  const ranked: RankedRelated[] = [];
 
-  for (const candidate of candidates) {
-    const item = asRecord(candidate);
-    const number =
-      asString(item.publication_number) ||
-      asString(item.application_number);
-    if (
-      !number ||
-      number.toUpperCase() === currentNumber.toUpperCase() ||
-      seen.has(number)
-    ) {
-      continue;
+  for (const group of groups) {
+    for (let index = 0; index < group.items.length; index += 1) {
+      const item = asRecord(group.items[index]);
+      const number =
+        asString(item.publication_number) ||
+        asString(item.application_number);
+      const key = number.toUpperCase();
+      if (!key || key === currentNumber.toUpperCase() || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+
+      const publicationDate = asString(item.publication_date);
+      const year =
+        publicationYear(publicationDate) ||
+        publicationYear(asString(item.priority_date));
+      const relevance = relevanceScoreFor(group.source, index);
+
+      ranked.push({
+        year,
+        source: group.source,
+        score:
+          RELEVANCE_WEIGHT * relevance + RECENCY_WEIGHT * recencyScore(year),
+        patent: {
+          number,
+          title: asString(item.title) || "제목 정보 없음",
+          assignee:
+            asString(item.assignee) ||
+            asString(item.assignee_original) ||
+            namesFrom(item.assignees).join(", ") ||
+            "출원인 정보 없음",
+          publicationDate: publicationDate || undefined,
+          relevance: relevanceLabel(group.source, year, sourceYear),
+          url: `https://patents.google.com/patent/${encodeURIComponent(number)}/en`,
+        },
+      });
     }
-
-    seen.add(number);
-    results.push({
-      number,
-      title: asString(item.title) || "제목 정보 없음",
-      assignee:
-        asString(item.assignee) ||
-        asString(item.assignee_original) ||
-        namesFrom(item.assignees).join(", ") ||
-        "출원인 정보 없음",
-      relevance: "Google Patents에서 확인된 유사·인용 특허",
-      url:
-        asString(item.link) ||
-        `https://patents.google.com/patent/${encodeURIComponent(number)}/en`,
-    });
-    if (results.length === 5) break;
   }
 
-  return results;
+  ranked.sort((a, b) => b.score - a.score);
+  return pickBalanced(ranked).map((item) => item.patent);
 }
 
 export function normalizePatentNumber(input: string): string {
