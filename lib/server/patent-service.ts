@@ -70,6 +70,10 @@ export async function analyzePatent(
     problem: analysis.problem,
     solution: analysis.solution,
     technicalOverview: analysis.technicalOverview,
+    priorArt: uniqueBy(
+      analysis.priorArt,
+      (item) => `${normalizedKey(item.reference)}|${normalizedKey(item.approach)}`
+    ),
     methods: analysis.methods,
     compositions: analysis.compositions.map((item) => ({
       ...item,

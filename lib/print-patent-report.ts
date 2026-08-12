@@ -200,6 +200,16 @@ function reportBody(data: PatentAnalysis): string {
     )
     .join("");
 
+  const priorArtRows = data.priorArt
+    .map(
+      (item) => `<tr>
+        <td>${escapeHtml(item.reference)}</td>
+        <td>${escapeHtml(item.approach)}</td>
+        <td>${escapeHtml(item.limitation)}</td>
+      </tr>`
+    )
+    .join("");
+
   const methodsHtml = data.methods
     .map(
       (method) => `<div class="pdf-block">
@@ -280,6 +290,17 @@ function reportBody(data: PatentAnalysis): string {
     ${paragraph(data.problem)}
     <h3>발명의 핵심</h3>
     ${paragraph(data.solution)}
+    <h3>선행 기술 및 한계점 비교</h3>
+    ${
+      priorArtRows
+        ? `<table>
+      <thead>
+        <tr><th>선행 특허 번호</th><th>시도한 기술 내용</th><th>기존 기술의 한계 및 문제점</th></tr>
+      </thead>
+      <tbody>${priorArtRows}</tbody>
+    </table>`
+        : "<p>원문 배경기술에서 비교 가능한 선행 기술이 확인되지 않았습니다.</p>"
+    }
     <h3>요약 (Abstract)</h3>
     ${paragraph(data.abstract)}
   </section>

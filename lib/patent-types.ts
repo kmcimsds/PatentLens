@@ -7,6 +7,16 @@ export type EstimatedCondition = {
   rationale: string;
 };
 
+/** 배경기술 단락에서 추출한 선행 기술 비교 항목 */
+export type PriorArtEntry = {
+  /** 선행 특허 번호. 원문에 번호가 없으면 '선행 기술 1' 등의 명칭 */
+  reference: string;
+  /** 해당 선행 기술이 시도한 방법·구성 */
+  approach: string;
+  /** 본 발명이 지적한 한계·문제점 */
+  limitation: string;
+};
+
 export type RelatedPatent = {
   number: string;
   title: string;
@@ -36,6 +46,7 @@ export type PatentAnalysis = {
   problem: string;
   solution: string;
   technicalOverview: string;
+  priorArt: PriorArtEntry[];
   methods: {
     title: string;
     steps: string[];

@@ -43,12 +43,24 @@ export const SYSTEM_PROMPT = `너는 20년 경력의 특허변리사이자 화�
 1. 완벽한 한국어 정제: 영문 특허 특유의 어색한 수동태, 직역체(~에 의해 이루어짐, ~를 포함하는 것 등)를 완전히 배제하고, 한국 기술 보고서 표준체(~함, ~임, ~를 적용함)로 자연스럽게 가공하라.
 2. 기술적 정밀성: 단순한 문장 요약이 아니라 '기술의 핵심 메커니즘'과 '기존 기술 대비 차별점'이 명확히 드러나게 하라.
 3. 구체성 확보: 모호한 표현(예: "적절한 온도로 가열함") 대신 특허에 나온 구체적 수치, 시약명, 조건(예: "150~180℃ 조건에서 2시간 환류")을 명확히 명시하라.
-4. 언어: JSON의 모든 문자열은 자연스러운 한국어로만 작성한다. 전문 용어는 원칙적으로 한국어만 쓰고, 약어·고유 기술명만 최초 1회 '한국어(영문)' 형식으로 병기한다. 흔한 일반 용어(혈액, 온도, 용매, 검출 등)에 영문 괄호를 반복하지 않는다. 단위·화학식·특허번호·IPC만 원문 표기를 유지할 수 있다.
+4. 언어: 서술 문장은 자연스러운 한국어로 작성한다. 흔한 일반 용어(혈액, 온도, 용매, 검출 등)는 한국어로 쓰고 영문 괄호를 반복하지 않는다. 단위·화학식·특허번호·IPC는 원문 표기를 유지한다.
+
+5. 화학·기술 전문 용어 표기 (매우 중요):
+- 화학 물질명, 시약명, 고분자명, IUPAC 명칭은 억지로 한국어로 직역하지 마라.
+- 금지 예시: Polyacrylic acid → '다중아크릴산', Sodium dodecyl sulfate → '나트륨십이황산염' 같은 한자어·순화어 조어.
+- 허용 표기는 둘 중 하나다. (가) 영문 원어 그대로 표기: Polyacrylic acid. (나) 연구 현장에서 통용되는 외래어 음차: 폴리아크릴산.
+- 국내 연구자가 실제로 쓰는 표기를 우선한다. 통용되는 음차가 확실한 경우에만 음차를 쓰고, 확실하지 않으면 영문 원어를 그대로 둔다.
+- 장치명·공정명·분석기법 등 기술 용어도 같은 원칙을 따른다. 억지 번역보다 원어 또는 통용 음차가 낫다.
 
 [출력 구조 및 지침]
 1. 개요 및 발명의 목적
 - 해결하고자 하는 기존 기술의 한계점/문제점
 - 본 발명이 제안하는 핵심 해결 로직 및 기술적 개요
+- 선행 기술 비교: 배경기술(Background)·종래기술 단락에서 언급된 기존 특허와 선행 기술을 찾아 priorArt 배열로 정리한다.
+  · reference: 원문에 특허번호가 명시되면 그 번호를 그대로 쓴다. 없으면 '선행 기술 1', '기존 공정' 처럼 식별 가능한 이름을 붙인다.
+  · approach: 그 선행 기술이 시도한 방법·구성을 구체적으로 적는다.
+  · limitation: 본 발명이 지적한 한계·문제점을 적는다.
+  · 배경기술에 선행 기술 언급이 전혀 없으면 빈 배열로 둔다. 없는 특허번호를 지어내지 마라.
 
 2. 핵심 실험 방법 및 공정 (Step-by-Step)
 - 주요 반응/합성/제조 공정을 순서대로 명확하고 체계적으로 정리
@@ -73,6 +85,13 @@ const GeminiAnalysisSchema = z.object({
   problem: z.string().min(1),
   solution: z.string().min(1),
   technicalOverview: z.string().min(1),
+  priorArt: z.array(
+    z.object({
+      reference: z.string().min(1),
+      approach: z.string().min(1),
+      limitation: z.string().min(1),
+    })
+  ),
   methods: z.array(
     z.object({
       title: z.string().min(1),
@@ -138,6 +157,31 @@ const GEMINI_RESPONSE_SCHEMA = {
       type: "string",
       description:
         "발명의 전체 기술 개요와 목적. 핵심 구성·공정 흐름을 한국어로 요약.",
+    },
+    priorArt: {
+      type: "array",
+      description:
+        "배경기술·종래기술 단락에서 언급된 선행 기술 비교표. 원문에 언급이 없으면 빈 배열. 없는 특허번호를 지어내지 말 것.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          reference: {
+            type: "string",
+            description:
+              "선행 특허 번호(원문 명시 시 그대로). 번호가 없으면 '선행 기술 1', '기존 공정' 등 식별 가능한 명칭",
+          },
+          approach: {
+            type: "string",
+            description: "그 선행 기술이 시도한 방법·구성(한국어, 구체적으로)",
+          },
+          limitation: {
+            type: "string",
+            description: "본 발명이 지적한 해당 선행 기술의 한계·문제점(한국어)",
+          },
+        },
+        required: ["reference", "approach", "limitation"],
+      },
     },
     methods: {
       type: "array",
@@ -275,6 +319,7 @@ const GEMINI_RESPONSE_SCHEMA = {
     "problem",
     "solution",
     "technicalOverview",
+    "priorArt",
     "methods",
     "compositions",
     "estimatedConditions",
@@ -296,11 +341,13 @@ function buildAnalysisPrompt(patent: SerpPatentData): string {
 - 직역·수동태를 피하고 한국 기술 보고서 문체(~함, ~임, ~를 적용함)로 작성한다.
 - 핵심 메커니즘과 기존 기술 대비 차별점을 분명히 드러낸다.
 - 구체적 수치·시약·조건을 원문에서 찾아 명시한다. 모호한 표현은 피한다.
-- 일반 용어에 영문 괄호를 남발하지 않는다. 전문약어·고유명만 최초 1회 병기한다.
+- 화학 물질명·시약명·고분자명은 한국어로 직역하지 말고, 영문 원어(Polyacrylic acid) 또는 통용 음차(폴리아크릴산)로 적는다.
+- 일반 용어에 영문 괄호를 남발하지 않는다.
 - abstractKo는 원문 초록을 자연스러운 한국어로 정제 번역한다.
+- priorArt에는 배경기술 단락에서 언급된 선행 특허·종래 기술과 그 한계를 정리한다. 언급이 없으면 빈 배열로 둔다.
 - estimatedConditions에는 생략/모호한 실험 조건에 대한 전문가 추정과 논리 근거를 넣는다.
 - 정량 결과는 원문에서 확인된 내용만 기록하고, 추정과 사실을 구분한다.
-- JP/EP 등 해외 특허도 출력 문자열은 전부 한국어로 작성한다.
+- JP/EP 등 해외 특허도 서술 문장은 전부 한국어로 작성한다.
 
 [서지 정보]
 - 공개번호: ${patent.number}
@@ -337,6 +384,7 @@ function buildRelatedTitlePrompt(items: RelatedPatent[]): string {
 
 [규칙]
 - 직역·수동태를 피하고 한국 특허 제목 관례에 맞게 작성한다.
+- 화학 물질명·고분자명은 억지로 번역하지 말고 영문 원어 또는 통용 음차(예: 폴리아크릴산)로 적는다.
 - 특허번호는 입력과 동일하게 유지한다.
 - 각 항목마다 number와 titleKo를 JSON으로 반환한다.
 

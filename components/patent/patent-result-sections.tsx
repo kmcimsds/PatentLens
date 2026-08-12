@@ -161,6 +161,47 @@ export function PatentResultSections({ data }: { data: PatentAnalysis }) {
             </div>
           </div>
           <div>
+            <p className="mb-3 text-sm font-semibold text-foreground">
+              선행 기술 및 한계점 비교
+            </p>
+            {data.priorArt.length ? (
+              <div className="overflow-x-auto rounded-xl border border-border/70">
+                <table className="w-full min-w-[640px] text-left text-sm">
+                  <thead className="bg-muted/50 text-muted-foreground">
+                    <tr>
+                      <th className="w-[22%] px-4 py-3 font-medium">선행 특허 번호</th>
+                      <th className="w-[39%] px-4 py-3 font-medium">시도한 기술 내용</th>
+                      <th className="w-[39%] px-4 py-3 font-medium">
+                        기존 기술의 한계 및 문제점
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.priorArt.map((item, index) => (
+                      <tr
+                        key={`${item.reference}-${index}`}
+                        className="border-t border-border/60 align-top"
+                      >
+                        <td className="px-4 py-3 font-mono text-xs font-medium">
+                          {item.reference}
+                        </td>
+                        <td className="px-4 py-3 leading-6">{item.approach}</td>
+                        <td className="px-4 py-3 leading-6 text-muted-foreground">
+                          {item.limitation}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-center text-sm text-muted-foreground">
+                원문 배경기술에서 비교 가능한 선행 기술이 확인되지 않았습니다.
+              </p>
+            )}
+          </div>
+
+          <div>
             <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               요약 (Abstract)
             </p>
