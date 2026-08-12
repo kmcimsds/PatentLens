@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, Printer, RefreshCw } from "lucide-react";
+import { AlertCircle, Loader2, Presentation, Printer, RefreshCw } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 
 import { AnalysisLoader } from "@/components/patent/analysis-loader";
@@ -10,6 +10,7 @@ import { PatentSearchBar } from "@/components/patent/patent-search-bar";
 import { TableOfContents } from "@/components/patent/table-of-contents";
 import { ThemeToggle } from "@/components/patent/theme-toggle";
 import { Button } from "@/components/ui/button";
+import { downloadPatentPptx } from "@/lib/export-patent-pptx";
 import { EXAMPLE_PATENT_NUMBER } from "@/lib/patent-dummy-data";
 import { printPatentReport } from "@/lib/print-patent-report";
 import type { PatentAnalysis } from "@/lib/patent-types";
@@ -37,6 +38,7 @@ export function PatentApp() {
   const [result, setResult] = useState<PatentAnalysis | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [apiKeysConfigured, setApiKeysConfigured] = useState(false);
+  const [isExportingPptx, setIsExportingPptx] = useState(false);
   const printingRef = useRef(false);
 
   const handleKeysChange = useCallback((keys: UserApiKeys) => {
@@ -113,6 +115,23 @@ export function PatentApp() {
       setView("error");
     } finally {
       printingRef.current = false;
+    }
+  };
+
+  const handlePptxDownload = async () => {
+    if (!result || isExportingPptx) return;
+    setIsExportingPptx(true);
+    try {
+      await downloadPatentPptx(result);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "PPTX 파일을 만들지 못했습니다. 잠시 후 다시 시도해 주세요."
+      );
+      setView("error");
+    } finally {
+      setIsExportingPptx(false);
     }
   };
 
@@ -226,15 +245,31 @@ export function PatentApp() {
                   분석 결과 · {result.number}
                 </p>
                 <div className="flex flex-col items-end gap-1">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={handlePrint}
-                    className="rounded-xl"
-                  >
-                    <Printer className="h-4 w-4" />
-                    인쇄 / PDF 저장
-                  </Button>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handlePrint}
+                      className="rounded-xl"
+                    >
+                      <Printer className="h-4 w-4" />
+                      인쇄 / PDF 저장
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handlePptxDownload}
+                      disabled={isExportingPptx}
+                      className="rounded-xl"
+                    >
+                      {isExportingPptx ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Presentation className="h-4 w-4" />
+                      )}
+                      {isExportingPptx ? "생성 중…" : "PPTX 다운로드"}
+                    </Button>
+                  </div>
                   <p className="max-w-xs text-right text-xs leading-relaxed text-muted-foreground">
                     대상은 &lsquo;PDF로 저장&rsquo;을 고르고, &lsquo;이미지로 인쇄&rsquo;는
                     끄세요. (켜면 텍스트 복사가 안 됩니다)
