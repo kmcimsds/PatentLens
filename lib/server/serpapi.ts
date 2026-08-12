@@ -143,7 +143,17 @@ function deriveGrantDate(raw: JsonRecord): string | undefined {
   return asString(raw.grant_date) || asString(grantEvent?.date) || undefined;
 }
 
-async function fetchDescription(descriptionLink: string): Promise<string> {
+/**
+ * 상세 설명을 제공하는 호스트.
+ * SerpApi는 description_link로 자사에 보관한 설명 HTML을 돌려주고,
+ * 그 링크가 만료된 경우를 대비해 Google Patents 원문 페이지도 허용한다.
+ */
+const DESCRIPTION_HOSTS = new Set(["patents.google.com", "serpapi.com"]);
+
+/** 설명 본문으로 인정할 최소 길이. 오류 페이지·빈 프래그먼트를 걸러낸다. */
+const MIN_DESCRIPTION_LENGTH = 200;
+
+async function fetchDescriptionFrom(descriptionLink: string): Promise<string> {
   if (!descriptionLink) return "";
 
   let url: URL;
@@ -152,7 +162,7 @@ async function fetchDescription(descriptionLink: string): Promise<string> {
   } catch {
     return "";
   }
-  if (url.protocol !== "https:" || url.hostname !== "patents.google.com") {
+  if (url.protocol !== "https:" || !DESCRIPTION_HOSTS.has(url.hostname)) {
     return "";
   }
 
@@ -179,6 +189,14 @@ async function fetchDescription(descriptionLink: string): Promise<string> {
     // 상세 설명을 못 가져와도 초록·청구항 분석은 계속 진행합니다.
     return "";
   }
+}
+
+async function fetchDescription(candidateLinks: string[]): Promise<string> {
+  for (const link of candidateLinks) {
+    const text = await fetchDescriptionFrom(link);
+    if (text.length >= MIN_DESCRIPTION_LENGTH) return text;
+  }
+  return "";
 }
 
 type RelatedSource = "citedBy" | "similar" | "family";
@@ -466,9 +484,10 @@ export async function fetchPatentFromSerpApi(
     asString(raw.main_url) ||
     asString(asRecord(raw.search_metadata).google_patents_url) ||
     `https://patents.google.com/patent/${encodeURIComponent(publicationNumber)}/en`;
-  const description = await fetchDescription(
-    asString(raw.description_link) || `${googlePatentsUrl}#description`
-  );
+  const description = await fetchDescription([
+    asString(raw.description_link),
+    googlePatentsUrl,
+  ]);
 
   return {
     number: publicationNumber,
