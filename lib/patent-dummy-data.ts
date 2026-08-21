@@ -1,7 +1,7 @@
 import type { PatentAnalysis } from "@/lib/patent-types";
 
 /** 데모용 예시 특허 번호 */
-export const EXAMPLE_PATENT_NUMBER = "US10123456B2";
+export const EXAMPLE_PATENT_NUMBER = "KR20240096026A";
 
 /**
  * 1단계 UI용 더미 분석 데이터.

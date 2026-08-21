@@ -53,7 +53,7 @@ export function PatentSearchBar({
           <Input
             value={value}
             onChange={(e) => onChange(e.target.value)}
-            placeholder="특허 번호 입력 (예: US10123456B2)"
+            placeholder="특허 번호 입력 (예: KR20240096026A)"
             disabled={disabled}
             autoFocus={autoFocus}
             spellCheck={false}
