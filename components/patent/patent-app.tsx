@@ -3,6 +3,7 @@
 import { AlertCircle, Loader2, Presentation, Printer, RefreshCw } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 
+import { AnalysisErrorGuide } from "@/components/patent/analysis-error-guide";
 import { AnalysisLoader } from "@/components/patent/analysis-loader";
 import { ApiKeySettings } from "@/components/patent/api-key-settings";
 import { PatentResultSections } from "@/components/patent/patent-result-sections";
@@ -154,6 +155,7 @@ export function PatentApp() {
           <div className="flex shrink-0 items-center gap-2">
             <ApiKeySettings onKeysChange={handleKeysChange} />
             <ThemeToggle />
+            <AnalysisErrorGuide />
           </div>
         </div>
       </header>
