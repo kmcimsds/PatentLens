@@ -6,7 +6,10 @@ import type { LegalStatus, RelatedPatent } from "@/lib/patent-types";
 import { ApiError, isAbortError } from "@/lib/server/api-error";
 
 const SERPAPI_ENDPOINT = "https://serpapi.com/search.json";
-const SERPAPI_TIMEOUT_MS = 25_000;
+// [A안] Gemini 재시도까지 포함해 Vercel 90초 안에 들어오도록 상류 조회 시간을 줄인다.
+const SERPAPI_TIMEOUT_MS = 20_000;
+// 상세 설명 HTML 1회 fetch 상한. 실패해도 초록·청구항으로 분석을 계속하므로 짧게 끊는다.
+const DESCRIPTION_FETCH_TIMEOUT_MS = 8_000;
 
 // 연관 특허 추천 가중치. Google Patents가 돌려주는 순서는 오래된 원천 특허 쪽으로
 // 크게 쏠려 있어, 관련성과 최신성을 함께 반영해 다시 정렬한다.
@@ -38,6 +41,8 @@ export type SerpPatentData = {
   claims: string;
   description: string;
   relatedPatents: RelatedPatent[];
+  /** SerpApi images/figures에서 모은 도면 URL. 없으면 빈 배열. */
+  images: string[];
 };
 
 function asRecord(value: unknown): JsonRecord {
@@ -50,6 +55,83 @@ function asString(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number") return String(value);
   return "";
+}
+
+const IMAGE_URL_KEYS = [
+  "full",
+  "full_url",
+  "original",
+  "image",
+  "image_url",
+  "url",
+  "src",
+  "link",
+  "thumbnail",
+] as const;
+
+function isHttpsImageUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function looksLikeFig1(value: unknown): boolean {
+  const text = textFrom(value).toLowerCase();
+  return /\bfig(?:ure)?\.?\s*1\b|\b도면\s*1\b/.test(text);
+}
+
+function collectImageUrl(out: string[], seen: Set<string>, value: unknown) {
+  const url = asString(value);
+  if (!url || !isHttpsImageUrl(url) || seen.has(url)) return;
+  seen.add(url);
+  out.push(url);
+}
+
+function collectImageFromItem(out: string[], seen: Set<string>, item: unknown) {
+  if (typeof item === "string") {
+    collectImageUrl(out, seen, item);
+    return;
+  }
+  const record = asRecord(item);
+  for (const key of IMAGE_URL_KEYS) {
+    if (record[key]) {
+      collectImageUrl(out, seen, record[key]);
+      return;
+    }
+  }
+}
+
+/**
+ * SerpApi 응답의 images / figures 필드에서 도면 URL을 모은다.
+ * 필드가 없거나 형식이 달라도 절대 던지지 않고 빈 배열을 반환한다.
+ * Fig. 1이 식별되면 그 URL을 맨 앞에 둔다.
+ */
+export function extractPatentImages(raw: JsonRecord): string[] {
+  try {
+    const seen = new Set<string>();
+    const urls: string[] = [];
+    const fig1Urls: string[] = [];
+
+    const pools: unknown[] = [raw.images, raw.figures, raw.figure];
+    for (const pool of pools) {
+      const items = Array.isArray(pool) ? pool : pool ? [pool] : [];
+      for (const item of items) {
+        const before = urls.length + fig1Urls.length;
+        const target = looksLikeFig1(item) ? fig1Urls : urls;
+        collectImageFromItem(target, seen, item);
+        if (urls.length + fig1Urls.length === before && looksLikeFig1(item)) {
+          collectImageFromItem(fig1Urls, seen, asRecord(item).image);
+        }
+      }
+    }
+
+    return [...fig1Urls, ...urls];
+  } catch {
+    return [];
+  }
 }
 
 function textFrom(value: unknown): string {
@@ -167,8 +249,8 @@ async function fetchDescriptionFrom(descriptionLink: string): Promise<string> {
   }
 
   try {
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(20_000),
+    const     response = await fetch(url, {
+      signal: AbortSignal.timeout(DESCRIPTION_FETCH_TIMEOUT_MS),
       cache: "no-store",
       headers: {
         Accept: "text/html",
@@ -504,5 +586,6 @@ export async function fetchPatentFromSerpApi(
     claims: textFrom(raw.claims),
     description: description || textFrom(raw.description),
     relatedPatents: relatedFrom(raw, publicationNumber),
+    images: extractPatentImages(raw),
   };
 }

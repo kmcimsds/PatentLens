@@ -29,6 +29,20 @@ export type RelatedPatent = {
   url: string;
 };
 
+export const NO_FIGURE_FALLBACK =
+  "본 특허에는 첨부된 도면이 없어 본문 텍스트 기반으로 요약을 구성했습니다.";
+
+export const FIGURE_ANALYSIS_FALLBACK =
+  "대표 도면은 확인되었으나 이미지 해석에 실패하여 본문 텍스트 기반으로 요약을 구성했습니다.";
+
+/** 대표 도면 멀티모달 분석. 실패해도 텍스트 요약과 독립적으로 채워진다. */
+export type FigureAnalysis = {
+  hasFigure: boolean;
+  imageUrl?: string;
+  figureType: string;
+  summary: string;
+};
+
 export type PatentAnalysis = {
   number: string;
   title: string;
@@ -64,11 +78,13 @@ export type PatentAnalysis = {
   };
   relatedKeywords: string[];
   relatedPatents: RelatedPatent[];
+  figureAnalysis: FigureAnalysis;
 };
 
 export const TOC_SECTIONS = [
   { id: "basic-info", label: "1. 기본 정보 및 법적 상태" },
   { id: "overview", label: "2. 기술 개요 및 목적" },
+  { id: "figure-analysis", label: "대표 도면 분석 및 주요 의미" },
   { id: "methods", label: "3. 핵심 실험 방법 및 구성" },
   { id: "ai-estimate", label: "4. AI 추정 실험 조건" },
   { id: "results", label: "5. 실험 결과 및 효과" },

@@ -7,7 +7,10 @@ import { checkRateLimit, getClientIp } from "@/lib/server/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 90;
+// [A안] 서버 내부 시간 예산(SerpApi 20s + 상세설명 8~16s + Gemini 재시도 55s)은 90초 안에
+// 들어오도록 설계했다. Vercel Pro라면 maxDuration이 300초까지 허용되어 여유가 생기고,
+// Hobby 등 하위 요금제에서는 플랫폼이 자동으로 상한을 낮춰 적용하므로 설정은 안전하다.
+export const maxDuration = 300;
 
 const RequestSchema = z.object({
   patentNumber: z.string().trim().min(1).max(32),

@@ -4,15 +4,17 @@ import {
   Beaker,
   ExternalLink,
   FlaskConical,
+  Images,
   Lightbulb,
   Link2,
   Sparkles,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { LegalStatus, PatentAnalysis } from "@/lib/patent-types";
+import { NO_FIGURE_FALLBACK } from "@/lib/patent-types";
 import { cn } from "@/lib/utils";
 
 function statusVariant(status: LegalStatus) {
@@ -210,6 +212,8 @@ export function PatentResultSections({ data }: { data: PatentAnalysis }) {
         </div>
       </section>
 
+      <FigureAnalysisSection data={data} />
+
       {/* 3. 실험 방법 */}
       <section aria-labelledby="methods-heading">
         <SectionHeading id="methods" icon={<Beaker className="h-4 w-4" />}>
@@ -405,6 +409,56 @@ export function PatentResultSections({ data }: { data: PatentAnalysis }) {
         </div>
       </section>
     </div>
+  );
+}
+
+function FigureAnalysisSection({ data }: { data: PatentAnalysis }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const figure = data.figureAnalysis ?? {
+    hasFigure: false,
+    figureType: "도면 없음",
+    summary: NO_FIGURE_FALLBACK,
+  };
+  const showImage = Boolean(figure.imageUrl) && !imageFailed;
+
+  return (
+    <section aria-labelledby="figure-analysis-heading">
+      <SectionHeading id="figure-analysis" icon={<Images className="h-4 w-4" />}>
+        <span id="figure-analysis-heading">대표 도면 분석 및 주요 의미</span>
+      </SectionHeading>
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        {showImage ? (
+          <div className="overflow-hidden rounded-2xl border border-border/70 bg-muted/30 p-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={figure.imageUrl}
+              alt={`${data.number} 대표 도면`}
+              className="mx-auto max-h-80 w-full object-contain"
+              onError={() => setImageFailed(true)}
+            />
+          </div>
+        ) : (
+          <div className="flex min-h-40 items-center justify-center rounded-2xl border border-dashed border-border/70 bg-muted/25 px-4 text-center text-sm text-muted-foreground">
+            {figure.hasFigure
+              ? "대표 도면 URL은 있으나 미리보기를 표시하지 못했습니다."
+              : "첨부된 대표 도면이 없습니다."}
+          </div>
+        )}
+
+        <div className="rounded-2xl border border-border/70 bg-card/80 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            도면 유형
+          </p>
+          <p className="mt-1 font-display text-lg font-semibold tracking-tight">
+            {figure.figureType}
+          </p>
+          <p className="mt-4 text-[0.95rem] leading-7 text-foreground/90">
+            {figure.summary}
+          </p>
+        </div>
+      </div>
+    </section>
   );
 }
 

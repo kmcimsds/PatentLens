@@ -1,8 +1,10 @@
 import "server-only";
 
-import type { PatentAnalysis } from "@/lib/patent-types";
+import type { FigureAnalysis, PatentAnalysis } from "@/lib/patent-types";
+import { NO_FIGURE_FALLBACK } from "@/lib/patent-types";
 import { ApiError } from "@/lib/server/api-error";
 import {
+  analyzeFigureWithGemini,
   analyzePatentWithGemini,
   translateRelatedPatentTitles,
 } from "@/lib/server/gemini";
@@ -48,9 +50,28 @@ export async function analyzePatent(
 
   const patentNumber = normalizePatentNumber(input);
   const patent = await fetchPatentFromSerpApi(patentNumber, serpApiKey);
-  const [analysis, relatedPatents] = await Promise.all([
+  const [analysis, relatedPatents, figureAnalysis] = await Promise.all([
     analyzePatentWithGemini(patent, geminiApiKey),
     translateRelatedPatentTitles(patent.relatedPatents, geminiApiKey),
+    analyzeFigureWithGemini(patent, geminiApiKey).catch((error): FigureAnalysis => {
+      console.warn("Figure analysis failed", {
+        detail: error instanceof Error ? error.message : "unknown",
+      });
+      const imageUrl = patent.images[0];
+      return imageUrl
+        ? {
+            hasFigure: true,
+            imageUrl,
+            figureType: "미확인",
+            summary:
+              "대표 도면은 확인되었으나 이미지 해석에 실패하여 본문 텍스트 기반으로 요약을 구성했습니다.",
+          }
+        : {
+            hasFigure: false,
+            figureType: "도면 없음",
+            summary: NO_FIGURE_FALLBACK,
+          };
+    }),
   ]);
 
   return {
@@ -101,5 +122,6 @@ export async function analyzePatent(
     },
     relatedKeywords: uniqueBy(analysis.relatedKeywords, normalizedKey),
     relatedPatents,
+    figureAnalysis,
   };
 }

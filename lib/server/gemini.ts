@@ -4,14 +4,31 @@ import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 
 import { ApiError } from "@/lib/server/api-error";
-import type { RelatedPatent } from "@/lib/patent-types";
+import {
+  FIGURE_ANALYSIS_FALLBACK,
+  NO_FIGURE_FALLBACK,
+  type FigureAnalysis,
+  type RelatedPatent,
+} from "@/lib/patent-types";
 import type { SerpPatentData } from "@/lib/server/serpapi";
 
-const GEMINI_TIMEOUT_MS = 75_000;
+// [A안] Vercel maxDuration(90초) 안에 반드시 들어오도록 시간 예산을 재배분한다.
+// 본문 분석(재시도 포함)에 쓸 총 예산과, 1회 호출당 상한을 분리해 둔다.
+const GEMINI_ANALYSIS_BUDGET_MS = 55_000; // 재시도·폴백을 모두 포함한 본문 분석 총 상한
+const GEMINI_ATTEMPT_TIMEOUT_MS = 42_000; // generateContent 1회 호출 상한
 const GEMINI_TRANSLATE_TIMEOUT_MS = 20_000;
+const GEMINI_FIGURE_TIMEOUT_MS = 25_000;
+const FIGURE_FETCH_TIMEOUT_MS = 8_000;
+const FIGURE_MAX_BYTES = 4_000_000;
+// [B안] 503/429 등 일시적 과부하 시 지수 백오프로 재시도한다. 503은 보통 즉시 반환되므로
+// 짧은 대기만으로도 성공률이 크게 오른다. (단위: ms)
+const GEMINI_RETRY_BACKOFF_MS = [800, 2_000, 4_000];
 // Gemini 3.x는 temperature·topP·topK 기본값(1.0)에 맞춰 튜닝되어 있어,
 // 값을 낮추면 응답이 반복되거나 추론 품질이 떨어진다. 샘플링 파라미터를 지정하지 말 것.
 const DEFAULT_MODEL = "gemini-3.6-flash";
+// [B안] 주 모델이 계속 혼잡하면 동급 Flash 모델로 폴백한다. 품질 저하를 최소화하기 위해
+// 같은 Flash 계열을 기본값으로 둔다. GEMINI_FALLBACK_MODEL 환경변수로 바꿀 수 있다.
+const DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash";
 
 const RELATED_TITLE_TRANSLATE_SCHEMA = {
   type: "object",
@@ -483,6 +500,132 @@ function resolveModel(): string {
   return process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
 }
 
+function resolveFallbackModel(): string {
+  return process.env.GEMINI_FALLBACK_MODEL?.trim() || DEFAULT_FALLBACK_MODEL;
+}
+
+// [B안] 본문 분석에 사용할 모델 순서. 주 모델 → (다르면) 폴백 모델.
+function analysisModelChain(): string[] {
+  const primary = resolveModel();
+  const fallback = resolveFallbackModel();
+  return primary.toLowerCase() === fallback.toLowerCase()
+    ? [primary]
+    : [primary, fallback];
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 1회 호출에 타임아웃을 건다. 타임아웃이 나도 하위 요청은 계속 돌 수 있으나,
+// 전체 시간 예산을 초과하지 않도록 상위에서 중단 판단에 사용한다.
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  onTimeout: () => Error
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(onTimeout()), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId) clearTimeout(timeoutId);
+  });
+}
+
+// [B안] 503/429/5xx·UNAVAILABLE·overloaded 등 "잠시 후 다시 시도하면 될" 오류만 재시도한다.
+// API 키 오류 등 재시도해도 소용없는 오류는 즉시 전파한다.
+function isRetryableGeminiError(error: unknown): boolean {
+  if (error instanceof ApiError) return error.retryable;
+  const status = errorStatus(error);
+  if (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  ) {
+    return true;
+  }
+  const detail = errorDetail(error);
+  return /UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|try again|deadline exceeded|internal error|temporarily/i.test(
+    detail
+  );
+}
+
+// [A안+B안] 본문 분석 generateContent를 "총 시간 예산" 안에서 재시도·폴백하며 호출한다.
+// - 주 모델 최대 (백오프 개수+1)회 재시도 후, 남은 시간이 있으면 폴백 모델 1회 시도
+// - 재시도 불가 오류(키 오류 등)는 즉시 throw
+// - 전체 예산을 넘기면 더 시도하지 않고 마지막 오류를 throw
+async function generateAnalysisWithRetry(
+  ai: GoogleGenAI,
+  contents: string,
+  config: Record<string, unknown>
+): Promise<{ response: Awaited<ReturnType<GoogleGenAI["models"]["generateContent"]>>; model: string }> {
+  const models = analysisModelChain();
+  const deadline = Date.now() + GEMINI_ANALYSIS_BUDGET_MS;
+  let lastError: unknown = new Error("No Gemini attempt was made");
+  let retryIndex = 0;
+
+  for (let m = 0; m < models.length; m += 1) {
+    const model = models[m];
+    const maxAttempts = m === 0 ? GEMINI_RETRY_BACKOFF_MS.length + 1 : 1;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 3_000) {
+        // 남은 예산이 거의 없으면 중단하고 마지막 오류로 처리한다.
+        return Promise.reject(lastError);
+      }
+      const perAttempt = Math.min(GEMINI_ATTEMPT_TIMEOUT_MS, remaining);
+
+      try {
+        const response = await withTimeout(
+          ai.models.generateContent({ model, contents, config }),
+          perAttempt,
+          () =>
+            new ApiError(
+              504,
+              "UPSTREAM_TIMEOUT",
+              "AI 분석 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
+              true
+            )
+        );
+        return { response, model };
+      } catch (error) {
+        lastError = error;
+        // 타임아웃이면 재시도해도 같은 지연이 반복되므로 즉시 전파한다.
+        if (error instanceof ApiError && error.code === "UPSTREAM_TIMEOUT") {
+          throw error;
+        }
+        // 재시도 불가 오류(키/권한 등)는 즉시 전파한다.
+        if (!isRetryableGeminiError(error)) throw error;
+
+        const isLastAttemptForModel = attempt === maxAttempts - 1;
+        const isLastModel = m === models.length - 1;
+        if (isLastAttemptForModel && isLastModel) break;
+
+        const backoff =
+          GEMINI_RETRY_BACKOFF_MS[
+            Math.min(retryIndex, GEMINI_RETRY_BACKOFF_MS.length - 1)
+          ];
+        retryIndex += 1;
+        // 백오프 후에도 예산이 남지 않으면 중단한다.
+        if (deadline - Date.now() <= backoff + 3_000) break;
+        console.warn("Gemini analysis retry", {
+          model,
+          attempt: attempt + 1,
+          nextBackoffMs: backoff,
+          status: errorStatus(error),
+        });
+        await sleep(backoff);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 function errorDetail(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -574,43 +717,24 @@ export async function analyzePatentWithGemini(
   }
 
   const ai = new GoogleGenAI({ apiKey });
-  const request = ai.models.generateContent({
-    model: resolveModel(),
-    contents: buildAnalysisPrompt(patent),
-    config: {
-      systemInstruction: SYSTEM_PROMPT,
-      responseMimeType: "application/json",
-      responseJsonSchema: GEMINI_RESPONSE_SCHEMA,
-    },
-  });
 
-  let response;
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let response: Awaited<ReturnType<GoogleGenAI["models"]["generateContent"]>>;
+  let usedModel = resolveModel();
   try {
-    response = await Promise.race([
-      request,
-      new Promise<never>((_, reject) =>
-        {
-          timeoutId = setTimeout(
-            () =>
-              reject(
-                new ApiError(
-                  504,
-                  "UPSTREAM_TIMEOUT",
-                  "AI 분석 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
-                  true
-                )
-              ),
-            GEMINI_TIMEOUT_MS
-          );
-        }
-      ),
-    ]);
+    const result = await generateAnalysisWithRetry(
+      ai,
+      buildAnalysisPrompt(patent),
+      {
+        systemInstruction: SYSTEM_PROMPT,
+        responseMimeType: "application/json",
+        responseJsonSchema: GEMINI_RESPONSE_SCHEMA,
+      }
+    );
+    response = result.response;
+    usedModel = result.model;
   } catch (error) {
     if (error instanceof ApiError) throw error;
     throw geminiFailure(error, "analyzePatent");
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
   }
 
   try {
@@ -619,7 +743,7 @@ export async function analyzePatentWithGemini(
     return GeminiAnalysisSchema.parse(JSON.parse(rawText));
   } catch (error) {
     console.error("Gemini response parsing failed", {
-      model: resolveModel(),
+      model: usedModel,
       detail: errorDetail(error),
     });
     throw new ApiError(
@@ -628,5 +752,161 @@ export async function analyzePatentWithGemini(
       "AI 분석 결과 형식을 확인할 수 없습니다. 다시 시도해 주세요.",
       true
     );
+  }
+}
+
+const FigureAnalysisSchema = z.object({
+  figureType: z.string().min(1),
+  summary: z.string().min(1),
+});
+
+const FIGURE_RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    figureType: {
+      type: "string",
+      description:
+        "도면 유형. 예: 공정 흐름도, 화학 반응식/구조식, 장치 구성도, 성능 비교 그래프, 기타",
+    },
+    summary: {
+      type: "string",
+      description:
+        "도면의 핵심 내용과 기술적 의미를 본문과 대조해 설명한 자연스러운 한국어 문단",
+    },
+  },
+  required: ["figureType", "summary"],
+} as const;
+
+function mimeFrom(contentType: string, imageUrl: string): string {
+  const header = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (header.startsWith("image/")) return header;
+  if (/\.jpe?g(\?|$)/i.test(imageUrl)) return "image/jpeg";
+  if (/\.gif(\?|$)/i.test(imageUrl)) return "image/gif";
+  if (/\.webp(\?|$)/i.test(imageUrl)) return "image/webp";
+  return "image/png";
+}
+
+async function fetchFigureInlineData(
+  imageUrl: string
+): Promise<{ mimeType: string; data: string } | undefined> {
+  try {
+    const response = await fetch(imageUrl, {
+      signal: AbortSignal.timeout(FIGURE_FETCH_TIMEOUT_MS),
+      cache: "no-store",
+      headers: {
+        Accept: "image/*,*/*",
+        "User-Agent": "PatentLens/1.0 (patent analysis service)",
+      },
+    });
+    if (!response.ok) return undefined;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length || buffer.length > FIGURE_MAX_BYTES) return undefined;
+    return {
+      mimeType: mimeFrom(response.headers.get("content-type") || "", imageUrl),
+      data: buffer.toString("base64"),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function emptyFigure(): FigureAnalysis {
+  return {
+    hasFigure: false,
+    figureType: "도면 없음",
+    summary: NO_FIGURE_FALLBACK,
+  };
+}
+
+function failedFigure(imageUrl: string): FigureAnalysis {
+  return {
+    hasFigure: true,
+    imageUrl,
+    figureType: "미확인",
+    summary: FIGURE_ANALYSIS_FALLBACK,
+  };
+}
+
+/**
+ * 대표 도면 Vision 분석. 기존 텍스트 분석을 바꾸지 않으며, 어떤 실패도 throw하지 않는다.
+ */
+export async function analyzeFigureWithGemini(
+  patent: SerpPatentData,
+  userApiKey?: string
+): Promise<FigureAnalysis> {
+  const imageUrl = patent.images[0];
+  if (!imageUrl) return emptyFigure();
+
+  const apiKey = userApiKey?.trim() || process.env.GEMINI_API_KEY;
+  if (!apiKey) return failedFigure(imageUrl);
+
+  const inlineData = await fetchFigureInlineData(imageUrl);
+  if (!inlineData) return failedFigure(imageUrl);
+
+  const prompt = `첨부된 특허 도면(Figure) 이미지와 아래 본문 텍스트를 상호 참조하여 분석하라.
+먼저 이미지의 유형(예: 공정 흐름도, 화학 반응식/구조식, 장치 구성도, 성능 비교 그래프 등)을 파악하고, 도면 속 부호/기호/데이터를 본문과 대조하여 이 도면이 나타내는 핵심 내용과 기술적 의미를 명확하고 자연스러운 한국어로 설명하라.
+
+[유형별 분석 가이드]
+- 공정/플로우차트인 경우: 주요 단계별 반응/제조 흐름 요약
+- 화학 구조식/반응식인 경우: 주요 화합물 구조, 핵심 범주, 반응 메커니즘 설명
+- 장치/기구 구조도인 경우: 주요 구성 부품 및 작동 원리 설명
+- 그래프/실험 데이터인 경우: 수치 변화 추이 및 기존 대비 성능 향상 의미 설명
+
+화학 물질명·장치명은 억지 직역하지 말고 영문 원어 또는 통용 음차로 적는다.
+
+[특허 번호] ${patent.number}
+[제목] ${patent.title}
+[초록]
+${truncate(patent.abstract, 4_000)}
+[청구항 발췌]
+${truncate(patent.claims, 6_000)}`;
+
+  const ai = new GoogleGenAI({ apiKey });
+  const request = ai.models.generateContent({
+    model: resolveModel(),
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { inlineData },
+          { text: prompt },
+        ],
+      },
+    ],
+    config: {
+      responseMimeType: "application/json",
+      responseJsonSchema: FIGURE_RESPONSE_SCHEMA,
+    },
+  });
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const response = await Promise.race([
+      request,
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error("Figure analysis timeout")),
+          GEMINI_FIGURE_TIMEOUT_MS
+        );
+      }),
+    ]);
+    const rawText = response.text;
+    if (!rawText) return failedFigure(imageUrl);
+    const parsed = FigureAnalysisSchema.parse(JSON.parse(rawText));
+    return {
+      hasFigure: true,
+      imageUrl,
+      figureType: parsed.figureType.trim(),
+      summary: parsed.summary.trim(),
+    };
+  } catch (error) {
+    console.warn("Figure analysis failed", {
+      model: resolveModel(),
+      detail: errorDetail(error),
+    });
+    return failedFigure(imageUrl);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
 }

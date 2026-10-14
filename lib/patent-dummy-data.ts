@@ -194,6 +194,12 @@ export const DUMMY_PATENT: PatentAnalysis = {
       url: "https://patents.google.com/patent/KR102234567B1",
     },
   ],
+  figureAnalysis: {
+    hasFigure: true,
+    figureType: "공정 흐름도",
+    summary:
+      "대표 도면은 바이오매스 당의 전처리, Ru-Ni 이원 촉매 수소화, 생성물 분리로 이어지는 배치 공정을 보여 준다. 본문의 140–160 °C, pH 4.5–5.5 조건과 맞춰 완만한 수소화 경로를 강조한다.",
+  },
 };
 
 /** 검색 번호에 따라 더미 결과를 반환 (실제 API 연동 전) */
