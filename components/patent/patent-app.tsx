@@ -73,7 +73,7 @@ export function PatentApp() {
           serpApiKey: keys.serpApiKey,
           geminiApiKey: keys.geminiApiKey,
         }),
-        signal: AbortSignal.timeout(95_000),
+        signal: AbortSignal.timeout(125_000),
       });
       const payload = (await response.json()) as AnalyzeResponse;
 

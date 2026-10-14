@@ -12,10 +12,12 @@ import {
 } from "@/lib/patent-types";
 import type { SerpPatentData } from "@/lib/server/serpapi";
 
-// [A안] Vercel maxDuration(90초) 안에 반드시 들어오도록 시간 예산을 재배분한다.
-// 본문 분석(재시도 포함)에 쓸 총 예산과, 1회 호출당 상한을 분리해 둔다.
-const GEMINI_ANALYSIS_BUDGET_MS = 55_000; // 재시도·폴백을 모두 포함한 본문 분석 총 상한
-const GEMINI_ATTEMPT_TIMEOUT_MS = 42_000; // generateContent 1회 호출 상한
+// [A안] 시간 예산 재배분. 본문 분석(재시도·폴백 포함)에 쓸 총 예산과, 1회 호출당 상한을 분리해 둔다.
+// 주의: Vercel에서 이 값이 실제로 보장되려면 함수 실행 시간이 route의 maxDuration(=300초)까지
+// 허용되어야 한다. 즉 Vercel Pro이거나 Hobby + Fluid Compute가 켜져 있어야 한다.
+// (Fluid Compute가 꺼진 Hobby는 60초에서 잘리므로 아래 상한이 끝까지 쓰이지 못한다.)
+const GEMINI_ANALYSIS_BUDGET_MS = 90_000; // 재시도·폴백을 모두 포함한 본문 분석 총 상한
+const GEMINI_ATTEMPT_TIMEOUT_MS = 70_000; // generateContent 1회 호출 상한(모델 지연 대비 상향)
 const GEMINI_TRANSLATE_TIMEOUT_MS = 20_000;
 const GEMINI_FIGURE_TIMEOUT_MS = 25_000;
 const FIGURE_FETCH_TIMEOUT_MS = 8_000;
@@ -553,6 +555,15 @@ function isRetryableGeminiError(error: unknown): boolean {
   );
 }
 
+// [B안] 404(모델 없음/미지원) 판별. 특정 키/프로젝트/지역에서 해당 모델이 아직
+// 열려 있지 않으면 Gemini가 404 NOT_FOUND를 반환한다. 같은 모델 재시도는 소용없고
+// 폴백 모델로 넘어가야 하므로, 일반 재시도와 분리해 별도로 판정한다.
+function isModelUnavailableError(error: unknown): boolean {
+  if (errorStatus(error) === 404) return true;
+  const detail = errorDetail(error);
+  return /NOT_FOUND|is not found|not supported for generateContent/i.test(detail);
+}
+
 // [A안+B안] 본문 분석 generateContent를 "총 시간 예산" 안에서 재시도·폴백하며 호출한다.
 // - 주 모델 최대 (백오프 개수+1)회 재시도 후, 남은 시간이 있으면 폴백 모델 1회 시도
 // - 재시도 불가 오류(키 오류 등)는 즉시 throw
@@ -597,6 +608,17 @@ async function generateAnalysisWithRetry(
         // 타임아웃이면 재시도해도 같은 지연이 반복되므로 즉시 전파한다.
         if (error instanceof ApiError && error.code === "UPSTREAM_TIMEOUT") {
           throw error;
+        }
+        // 404(모델 미제공): 같은 모델을 재시도해도 소용없으므로, 다음 모델(폴백)로 넘어간다.
+        // 사용자 키/프로젝트에 주 모델이 열려 있지 않은 경우 폴백 모델로 분석을 이어간다.
+        if (isModelUnavailableError(error)) {
+          if (m === models.length - 1) throw error; // 마지막 모델까지 없으면 전파
+          console.warn("Gemini model unavailable, falling back", {
+            model,
+            nextModel: models[m + 1],
+            status: errorStatus(error),
+          });
+          break; // 다음 모델로 전환
         }
         // 재시도 불가 오류(키/권한 등)는 즉시 전파한다.
         if (!isRetryableGeminiError(error)) throw error;
