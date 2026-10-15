@@ -430,42 +430,24 @@ export async function translateRelatedPatentTitles(
   if (!apiKey) return relatedPatents;
 
   const ai = new GoogleGenAI({ apiKey });
-  const request = ai.models.generateContent({
-    model: resolveModel(),
-    contents: buildRelatedTitlePrompt(needsTranslation),
-    config: {
-      systemInstruction:
-        "너는 특허 제목 번역 전문가이다. JSON Schema에 맞춰 한국어 특허 제목만 반환한다.",
-      responseMimeType: "application/json",
-      responseJsonSchema: RELATED_TITLE_TRANSLATE_SCHEMA,
-    },
-  });
+  const contents = buildRelatedTitlePrompt(needsTranslation);
+  const config = {
+    systemInstruction:
+      "너는 특허 제목 번역 전문가이다. JSON Schema에 맞춰 한국어 특허 제목만 반환한다.",
+    responseMimeType: "application/json" as const,
+    responseJsonSchema: RELATED_TITLE_TRANSLATE_SCHEMA,
+  };
 
-  let response;
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  try {
-    response = await Promise.race([
-      request,
-      new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(
-          () => reject(new Error("Related title translation timeout")),
-          GEMINI_TRANSLATE_TIMEOUT_MS
-        );
-      }),
-    ]);
-  } catch (error) {
-    console.warn("Related title translation failed", {
-      model: resolveModel(),
-      status: errorStatus(error),
-      detail: errorDetail(error),
-    });
-    return relatedPatents;
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-  }
+  const result = await generateContentWithModelFallback(
+    ai,
+    (model) => ai.models.generateContent({ model, contents, config }),
+    GEMINI_TRANSLATE_TIMEOUT_MS,
+    "translateRelatedPatentTitles"
+  );
+  if (!result) return relatedPatents;
 
   try {
-    const rawText = response.text;
+    const rawText = result.response.text;
     if (!rawText) return relatedPatents;
     const parsed = JSON.parse(rawText) as {
       titles?: { number: string; titleKo: string }[];
@@ -646,6 +628,71 @@ async function generateAnalysisWithRetry(
   }
 
   throw lastError;
+}
+
+type GenerateContentResult = Awaited<
+  ReturnType<GoogleGenAI["models"]["generateContent"]>
+>;
+
+// 도면·연관특허 제목 등 부가 호출용. 본문 분석과 동일한 주→폴백 모델 체인을 쓰되,
+// 예산은 호출별 timeoutMs로만 제한한다. 실패 시 null(throw 없음).
+async function generateContentWithModelFallback(
+  ai: GoogleGenAI,
+  buildRequest: (model: string) => ReturnType<GoogleGenAI["models"]["generateContent"]>,
+  timeoutMs: number,
+  context: string
+): Promise<{ response: GenerateContentResult; model: string } | null> {
+  const models = analysisModelChain();
+  let lastError: unknown;
+
+  for (let m = 0; m < models.length; m += 1) {
+    const model = models[m];
+    const maxAttempts = m === 0 ? 2 : 1;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const response = await withTimeout(
+          buildRequest(model),
+          timeoutMs,
+          () => new Error(`${context} timeout`)
+        );
+        return { response, model };
+      } catch (error) {
+        lastError = error;
+        if (isModelUnavailableError(error)) {
+          if (m === models.length - 1) break;
+          console.warn("Gemini model unavailable, falling back", {
+            context,
+            model,
+            nextModel: models[m + 1],
+            status: errorStatus(error),
+          });
+          break;
+        }
+        if (
+          attempt < maxAttempts - 1 &&
+          isRetryableGeminiError(error)
+        ) {
+          console.warn("Gemini ancillary retry", {
+            context,
+            model,
+            attempt: attempt + 1,
+            status: errorStatus(error),
+          });
+          await sleep(GEMINI_RETRY_BACKOFF_MS[0] ?? 800);
+          continue;
+        }
+        break;
+      }
+    }
+  }
+
+  console.warn("Gemini ancillary request failed", {
+    context,
+    status: errorStatus(lastError),
+    detail: errorDetail(lastError),
+  });
+  return null;
 }
 
 function errorDetail(error: unknown): string {
@@ -885,35 +932,27 @@ ${truncate(patent.abstract, 4_000)}
 ${truncate(patent.claims, 6_000)}`;
 
   const ai = new GoogleGenAI({ apiKey });
-  const request = ai.models.generateContent({
-    model: resolveModel(),
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { inlineData },
-          { text: prompt },
-        ],
-      },
-    ],
-    config: {
-      responseMimeType: "application/json",
-      responseJsonSchema: FIGURE_RESPONSE_SCHEMA,
+  const contents = [
+    {
+      role: "user" as const,
+      parts: [{ inlineData }, { text: prompt }],
     },
-  });
+  ];
+  const config = {
+    responseMimeType: "application/json" as const,
+    responseJsonSchema: FIGURE_RESPONSE_SCHEMA,
+  };
 
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const result = await generateContentWithModelFallback(
+    ai,
+    (model) => ai.models.generateContent({ model, contents, config }),
+    GEMINI_FIGURE_TIMEOUT_MS,
+    "analyzeFigure"
+  );
+  if (!result) return failedFigure(imageUrl);
+
   try {
-    const response = await Promise.race([
-      request,
-      new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(
-          () => reject(new Error("Figure analysis timeout")),
-          GEMINI_FIGURE_TIMEOUT_MS
-        );
-      }),
-    ]);
-    const rawText = response.text;
+    const rawText = result.response.text;
     if (!rawText) return failedFigure(imageUrl);
     const parsed = FigureAnalysisSchema.parse(JSON.parse(rawText));
     return {
@@ -923,12 +962,10 @@ ${truncate(patent.claims, 6_000)}`;
       summary: parsed.summary.trim(),
     };
   } catch (error) {
-    console.warn("Figure analysis failed", {
-      model: resolveModel(),
+    console.warn("Figure analysis parsing failed", {
+      model: result.model,
       detail: errorDetail(error),
     });
     return failedFigure(imageUrl);
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
   }
 }
