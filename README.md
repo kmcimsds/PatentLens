@@ -87,6 +87,7 @@ Noto Sans KR 폰트가 PDF에 임베드되어 텍스트를 복사·검색할 수
 | `SERPAPI_KEY` | (선택) 서버 기본 SerpApi 키 |
 | `GEMINI_API_KEY` | (선택) 서버 기본 Gemini 키 |
 | `GEMINI_MODEL` | (선택) 기본 `gemini-3.6-flash`. 모델 폐기 시 최신 모델명으로 덮어쓰기 |
+| `GEMINI_FALLBACK_MODEL` | (선택) 주 모델 404·혼잡 시 폴백, 기본 `gemini-2.5-flash` |
 | `RATE_LIMIT_MAX` | (선택) IP당 분당 분석 횟수, 기본 `10` |
 | `RATE_LIMIT_WINDOW_MS` | (선택) 제한 창(ms), 기본 `60000` |
 
